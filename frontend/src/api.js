@@ -2,7 +2,9 @@
 // api.js  —  Graph-based A* pathfinding + backend helpers
 // ─────────────────────────────────────────────
 
-const BASE = "http://localhost:8000";
+// In production (Vercel): /api/* is routed to the Python serverless function.
+// In local dev: Vite proxy forwards /api/* to http://localhost:8000.
+const BASE = "";
 const H    = { "Content-Type": "application/json" };
 
 const post = (path, body) =>
