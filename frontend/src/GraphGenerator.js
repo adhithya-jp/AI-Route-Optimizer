@@ -8,10 +8,12 @@
 // Wide viewBox to match a ~2:1 widescreen panel
 export const SVG_W   = 1600;
 export const SVG_H   = 820;
-const PADDING        = 65;          // breathing room on edges
-const NODE_COUNT     = 60;          // dense but not overcrowded
+const PADDING        = 65;
 const GRID_SIZE      = 20;
-const MIN_DIST       = 80;          // minimum pixels between nodes
+const DEFAULT_NODES  = 60;   // the "middle" value on the slider
+
+// MIN_DIST shrinks slightly as node count grows so the canvas stays fillable
+const minDist = (n) => Math.max(48, 95 - n * 0.55);
 
 // Max edge length as a fraction of canvas diagonal — no cross-map roads
 const DIAG           = Math.sqrt(SVG_W ** 2 + SVG_H ** 2);
@@ -33,14 +35,15 @@ function svgToGrid(val, svgMax) {
 }
 
 /** Poisson-disk-lite: reject nodes that are too close together */
-function placedNodes() {
+function placedNodes(nodeCount) {
   const all = [];
+  const md  = minDist(nodeCount);
   let attempts = 0;
-  while (all.length < NODE_COUNT && attempts < 8000) {
+  while (all.length < nodeCount && attempts < 12000) {
     attempts++;
     const x = PADDING + Math.random() * (SVG_W - 2 * PADDING);
     const y = PADDING + Math.random() * (SVG_H - 2 * PADDING);
-    const tooClose = all.some(n => Math.hypot(n.x - x, n.y - y) < MIN_DIST);
+    const tooClose = all.some(n => Math.hypot(n.x - x, n.y - y) < md);
     if (!tooClose) {
       const idx    = all.length;
       const prefix = LABEL_PREFIXES[Math.floor(idx / 10)];
@@ -96,9 +99,9 @@ function isRNGEdge(a, b, allNodes) {
 }
 
 /** Generate the full city graph */
-export function generateCityGraph() {
+export function generateCityGraph(nodeCount = DEFAULT_NODES) {
   // ── 1. Place nodes ──────────────────────────
-  const nodes = placedNodes();
+  const nodes = placedNodes(nodeCount);
   assignUniqueGridCells(nodes);
 
   // ── 2. Build edges ──────────────────────────

@@ -13,13 +13,23 @@ function App() {
   const [pathNodeIds, setPathNodeIds] = useState([]);
 
   // ── Controls ───────────────────────────────────────────
-  const [mode,    setMode]    = useState("time");
-  const [traffic, setTraffic] = useState(1);
-  const [godMode, setGodMode] = useState(false);
+  const [mode,      setMode]      = useState("time");
+  const [traffic,   setTraffic]   = useState(1);
+  const [godMode,   setGodMode]   = useState(false);
+  const [nodeCount, setNodeCount] = useState(60);  // slider: 20–100, middle=60
 
   // ── UI state ───────────────────────────────────────────
   const [calculating, setCalculating] = useState(false);
   const [stats,       setStats]       = useState({ ready: false });
+
+  // ── Splash screen ─────────────────────────────────────
+  const [splashVisible, setSplashVisible] = useState(true);   // mounted?
+  const [splashExiting, setSplashExiting] = useState(false);  // exit anim running?
+
+  const handleStart = useCallback(() => {
+    setSplashExiting(true);
+    setTimeout(() => setSplashVisible(false), 920); // matches CSS iris-close duration
+  }, []);
 
   // Keep a ref to the graph so async callbacks always see the latest version
   const graphRef = useRef(null);
@@ -28,8 +38,11 @@ function App() {
   // ── Generate city on first load ───────────────────────
   useEffect(() => { spawnNewCity(); }, []);  // eslint-disable-line
 
+  const nodeCountRef = useRef(nodeCount);
+  nodeCountRef.current = nodeCount;
+
   const spawnNewCity = useCallback(() => {
-    const g = generateCityGraph();
+    const g = generateCityGraph(nodeCountRef.current);
     setGraph(g);
     setStart(null);
     setGoal(null);
@@ -38,6 +51,11 @@ function App() {
     setGodMode(false);
     apiReset().catch(() => {});
   }, []);
+
+  // Regenerate city when node count slider is committed
+  const handleNodeCountCommit = useCallback(() => {
+    spawnNewCity();
+  }, [spawnNewCity]);
 
   // ── Core pathfinding trigger ───────────────────────────
   const runPath = useCallback(async (
@@ -163,6 +181,34 @@ function App() {
 
   return (
     <div className="app">
+      {/* ── SPLASH SCREEN ─────────────────────────────── */}
+      {splashVisible && (
+        <div className={`splash-overlay${splashExiting ? ' splash-exit' : ''}`}>
+          <div className={`splash-card${splashExiting ? ' splash-card-exit' : ''}`}>
+            {/* Decorative neon rings */}
+            <div className="splash-ring splash-ring-1"/>
+            <div className="splash-ring splash-ring-2"/>
+            <div className="splash-ring splash-ring-3"/>
+
+            <div className="splash-icon">⬡</div>
+            <h2 className="splash-title">AI Route Optimizer</h2>
+            <p className="splash-sub">City Network Pathfinding · A* with Dynamic Constraints</p>
+
+            <div className="splash-tags">
+              <span className="splash-tag">🟡 Toll Roads</span>
+              <span className="splash-tag">🔴 Congestion</span>
+              <span className="splash-tag">🔵 Optimal Path</span>
+            </div>
+
+            <button className="splash-start-btn" onClick={handleStart}>
+              <span className="splash-btn-glow"/>
+              <span className="splash-btn-text">▶ &nbsp; START</span>
+            </button>
+
+            <p className="splash-hint">Scroll to zoom · Drag to pan</p>
+          </div>
+        </div>
+      )}
       {/* HEADER */}
       <header className="header">
         <div className="header-left">
@@ -186,6 +232,7 @@ function App() {
           onNewCity={spawnNewCity}
           calculating={calculating}
           stats={stats}
+          nodeCount={nodeCount}   onNodeCountChange={setNodeCount}  onNodeCountCommit={handleNodeCountCommit}
         />
 
         <section className="graph-panel">

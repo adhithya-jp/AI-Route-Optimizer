@@ -22,8 +22,10 @@ function ControlPanel({
   godMode, onGodModeToggle,
   onNewCity,
   calculating, stats,
+  nodeCount, onNodeCountChange, onNodeCountCommit,
 }) {
-  const fill = ((traffic - 1) / 4) * 100;
+  const fill      = ((traffic   - 1) / 4)  * 100;
+  const nodeFill  = ((nodeCount - 20) / 80) * 100;
 
   return (
     <aside className="control-panel">
@@ -187,6 +189,35 @@ function ControlPanel({
           <div className="legend-item">
             <div className="legend-line path"/>
             <span>Active Path</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="divider"/>
+
+      {/* ── NETWORK DENSITY SLIDER ───────────────── */}
+      <div className="panel-section">
+        <span className="panel-label">Network Density</span>
+        <div className="slider-wrap">
+          <div className="slider-meta">
+            <span>Fewer Nodes</span>
+            <span className="val" style={{ color: 'var(--neon-cyan)' }}>
+              {nodeCount} nodes
+            </span>
+          </div>
+          <input
+            id="node-count-slider"
+            type="range" min="20" max="100" step="5"
+            value={nodeCount}
+            style={{ "--fill": `${nodeFill}%` }}
+            onChange={e => onNodeCountChange(parseInt(e.target.value, 10))}
+            onMouseUp={onNodeCountCommit}
+            onTouchEnd={onNodeCountCommit}
+          />
+          <div className="slider-meta">
+            <span style={{ fontSize: '0.65rem', color: 'var(--text-dim)' }}>
+              ◀ reduce · release to apply · increase ▶
+            </span>
           </div>
         </div>
       </div>

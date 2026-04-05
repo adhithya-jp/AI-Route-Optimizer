@@ -1,19 +1,23 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { SVG_W, SVG_H } from "./GraphGenerator";
 
+const MIN_ZOOM = 0.4;
+const MAX_ZOOM = 6;
+const ZOOM_STEP = 1.25;
+
 // ─── Road visual styles ───────────────────────────────────────────────────────
 const ROAD_BASE = {
-  highway: { stroke: "#ffcc00", strokeWidth: 4.5, dashArray: "12,7" },
-  main:    { stroke: "#777777", strokeWidth: 2.5,  dashArray: null   },
-  local:   { stroke: "#383838", strokeWidth: 1.5,  dashArray: null   },
+  highway: { stroke: "#ffcc00", strokeWidth: 5.5, dashArray: "12,7" },
+  main:    { stroke: "#777777", strokeWidth: 4.0,  dashArray: null   },
+  local:   { stroke: "#5a5a5a", strokeWidth: 1.0,  dashArray: null   },
 };
 
 // Per-congestion-level overrides (applied regardless of road type)
 const CONGESTION_STYLES = {
   //         stroke     width  glow-filter
-  clear:  { stroke: null,       widthAdd: 0, glow: null              },
+  clear:  { stroke: null,       widthAdd: 0,   glow: null               },
   medium: { stroke: "#ff8800",  widthAdd: 1.2, glow: "url(#glow-orange)" },
-  heavy:  { stroke: "#ff2200",  widthAdd: 2.5, glow: "url(#glow-red)"   },
+  heavy:  { stroke: "#ff3333",  widthAdd: 2.5, glow: "url(#glow-red)"   },
 };
 
 /**
@@ -52,8 +56,8 @@ const SvgDefs = () => (
       <feGaussianBlur stdDeviation="5" result="blur"/>
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
-    <filter id="glow-cyan" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="6" result="blur"/>
+    <filter id="glow-blue" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="9" result="blur"/>
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
     <filter id="glow-red" x="-60%" y="-60%" width="220%" height="220%">
@@ -61,7 +65,7 @@ const SvgDefs = () => (
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
     <filter id="glow-yellow" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feGaussianBlur stdDeviation="5" result="blur"/>
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
     <filter id="glow-orange" x="-60%" y="-60%" width="220%" height="220%">
@@ -70,9 +74,9 @@ const SvgDefs = () => (
     </filter>
     {/* Path travel gradient */}
     <linearGradient id="path-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%"   stopColor="#00cfff" stopOpacity="0.2"/>
-      <stop offset="50%"  stopColor="#00cfff" stopOpacity="1"/>
-      <stop offset="100%" stopColor="#00cfff" stopOpacity="0.2"/>
+      <stop offset="0%"   stopColor="#00b4ff" stopOpacity="0.2"/>
+      <stop offset="50%"  stopColor="#00b4ff" stopOpacity="1"/>
+      <stop offset="100%" stopColor="#00b4ff" stopOpacity="0.2"/>
     </linearGradient>
   </defs>
 );
@@ -82,11 +86,11 @@ const BgGrid = () => (
   <g opacity={0.06}>
     {Array.from({ length: 12 }, (_, i) => (
       <line key={`h${i}`} x1={0} y1={(SVG_H/12)*i} x2={SVG_W} y2={(SVG_H/12)*i}
-        stroke="#00cfff" strokeWidth={0.5}/>
+        stroke="#00b4ff" strokeWidth={0.5}/>
     ))}
     {Array.from({ length: 16 }, (_, i) => (
       <line key={`v${i}`} x1={(SVG_W/16)*i} y1={0} x2={(SVG_W/16)*i} y2={SVG_H}
-        stroke="#00cfff" strokeWidth={0.5}/>
+        stroke="#00b4ff" strokeWidth={0.5}/>
     ))}
   </g>
 );
@@ -108,8 +112,16 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
   const [tooltip,    setTooltip]    = useState(null);  // { svgX, svgY, text }
   const [animOffset, setAnimOffset] = useState(0);      // marching ants offset
   const [pathProgress, setPathProgress] = useState(0); // 0→1 travel animation
-  const svgRef = useRef(null);
-  const rafRef = useRef(null);
+
+  // ── Pan / Zoom state ──────────────────────────────────────────────────
+  const [zoom,   setZoom]   = useState(1);
+  const [pan,    setPan]    = useState({ x: 0, y: 0 });
+  const isDragging  = useRef(false);
+  const dragStart   = useRef({ mx: 0, my: 0, px: 0, py: 0 });
+
+  const svgRef    = useRef(null);
+  const wrapRef   = useRef(null);
+  const rafRef    = useRef(null);
 
   // ── Path edge / node sets ──────────────────────────────────────────────
   const pathEdgeIds = useMemo(() => {
@@ -152,6 +164,94 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
     return () => cancelAnimationFrame(rafRef.current);
   }, [pathEdgeIds]);
 
+  // ── Wheel → zoom centred on cursor ───────────────────────────────────
+  // We attach via useEffect with passive:false so we can preventDefault
+  // (React synthetic onWheel is passive in React 17+ and can't prevent page scroll)
+  const zoomStateRef = useRef({ zoom: 1, pan: { x: 0, y: 0 } });
+  zoomStateRef.current = { zoom, pan };
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = el.getBoundingClientRect();
+      const cx   = e.clientX - rect.left; // cursor relative to wrapper
+      const cy   = e.clientY - rect.top;
+      const { zoom: prevZoom, pan: prevPan } = zoomStateRef.current;
+      const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+      const next   = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prevZoom * factor));
+      const newPan = {
+        x: cx - (cx - prevPan.x) * (next / prevZoom),
+        y: cy - (cy - prevPan.y) * (next / prevZoom),
+      };
+      setZoom(next);
+      setPan(newPan);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Mouse drag → pan ─────────────────────────────────────────────────
+  const handleMouseDown = useCallback((e) => {
+    // only pan with left-button, and only when not clicking a node
+    if (e.button !== 0) return;
+    isDragging.current = true;
+    dragStart.current = { mx: e.clientX, my: e.clientY, px: pan.x, py: pan.y };
+    e.currentTarget.style.cursor = 'grabbing';
+  }, [pan]);
+
+  const handleMouseMove = useCallback((e) => {
+    if (!isDragging.current) return;
+    const dx = e.clientX - dragStart.current.mx;
+    const dy = e.clientY - dragStart.current.my;
+    setPan({ x: dragStart.current.px + dx, y: dragStart.current.py + dy });
+  }, []);
+
+  const handleMouseUp = useCallback((e) => {
+    isDragging.current = false;
+    if (e.currentTarget) e.currentTarget.style.cursor = 'grab';
+  }, []);
+
+  // ── Zoom button helpers ───────────────────────────────────────────────
+  const zoomIn = useCallback(() => {
+    setZoom(z => {
+      const next = Math.min(MAX_ZOOM, z * ZOOM_STEP);
+      // zoom toward centre of wrapper
+      if (wrapRef.current) {
+        const { width, height } = wrapRef.current.getBoundingClientRect();
+        const cx = width / 2, cy = height / 2;
+        setPan(p => ({
+          x: cx - (cx - p.x) * (next / z),
+          y: cy - (cy - p.y) * (next / z),
+        }));
+      }
+      return next;
+    });
+  }, []);
+
+  const zoomOut = useCallback(() => {
+    setZoom(z => {
+      const next = Math.max(MIN_ZOOM, z / ZOOM_STEP);
+      if (wrapRef.current) {
+        const { width, height } = wrapRef.current.getBoundingClientRect();
+        const cx = width / 2, cy = height / 2;
+        setPan(p => ({
+          x: cx - (cx - p.x) * (next / z),
+          y: cy - (cy - p.y) * (next / z),
+        }));
+      }
+      return next;
+    });
+  }, []);
+
+  const resetView = useCallback(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, []);
+
   // ── SVG mouse → SVG coordinate conversion ───────────────────────────
   const getSvgCoords = useCallback((clientX, clientY) => {
     if (!svgRef.current) return { x: clientX, y: clientY };
@@ -165,9 +265,15 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
   }, []);
 
   const handleEdgeMouseMove = useCallback((ev, text) => {
-    const { x, y } = getSvgCoords(ev.clientX, ev.clientY);
-    setTooltip({ svgX: x, svgY: y, text });
-  }, [getSvgCoords]);
+    // Store raw client coords so the DOM tooltip stays sharp at any zoom
+    if (!wrapRef.current) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    setTooltip({
+      x: ev.clientX - rect.left,
+      y: ev.clientY - rect.top,
+      text,
+    });
+  }, []);
 
   const handleEdgeClick = useCallback((ev, edgeId) => {
     if (!godMode) return;
@@ -214,19 +320,60 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
     return pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
   }, [pathPoints, pathProgress, totalPathLen]);
 
-  if (!graph) return <div className="graph-empty">Generate a city to begin.</div>;
-
-  const { nodes, edges } = graph;
-  const nodeById = Object.fromEntries(nodes.map(n => [n.id, n]));
+  // Always render the wrapper so wrapRef is set on first mount → wheel listener attaches correctly.
+  const { nodes, edges } = graph ?? { nodes: [], edges: [] };
+  const nodeById = graph ? Object.fromEntries(nodes.map(n => [n.id, n])) : {};
 
   return (
-    <div className="svg-wrapper">
+    <div
+      className="svg-wrapper"
+      ref={wrapRef}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
+      style={{ cursor: graph ? 'grab' : 'default' }}
+    >
+      {/* Empty state (shown while graph is null) */}
+      {!graph && (
+        <div className="graph-empty">Generate a city to begin.</div>
+      )}
       {calculating && (
         <div className="calculating-overlay">
           <div className="calc-spinner"/>
           <span className="calc-text">Calculating Route…</span>
         </div>
       )}
+
+      {/* ── Zoom controls (always static, like Google Maps) ── */}
+      <div className="zoom-controls" onMouseDown={e => e.stopPropagation()}>
+        <button className="zoom-btn" onClick={zoomIn}  title="Zoom in">＋</button>
+        <div className="zoom-divider"/>
+        <button className="zoom-btn" onClick={zoomOut} title="Zoom out">－</button>
+        <div className="zoom-divider"/>
+        <button className="zoom-btn reset" onClick={resetView} title="Reset view">⌂</button>
+      </div>
+
+      {/* Zoom-level indicator */}
+      <div className="zoom-level-badge">{Math.round(zoom * 100)}%</div>
+
+      {/* ── DOM Tooltip (pixel-sharp, scales with zoom) ── */}
+      {tooltip && (() => {
+        const s = Math.min(zoom, 4); // scale factor, capped at 4×
+        return (
+          <div
+            className="map-tooltip"
+            style={{
+              left:     tooltip.x + 14 * s,
+              top:      tooltip.y - 34 * s,
+              fontSize: `${0.82 * s}rem`,
+              padding:  `${5 * s}px ${11 * s}px`,
+            }}
+          >
+            {tooltip.text}
+          </div>
+        );
+      })()}
 
       <svg
         ref={svgRef}
@@ -235,7 +382,15 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
         className="city-svg"
         viewBox={`0 0 ${SVG_W} ${SVG_H}`}
         preserveAspectRatio="xMidYMid meet"
-        style={{ display: 'block', width: '100%', height: '100%' }}
+        style={{
+          display: 'block',
+          width: '100%',
+          height: '100%',
+          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+          transformOrigin: '0 0',
+          transition: 'none',
+          willChange: 'transform',
+        }}
       >
         <SvgDefs/>
         <BgGrid/>
@@ -259,7 +414,17 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
                   stroke="transparent" strokeWidth={18}
                   style={{ cursor: godMode ? 'pointer' : 'default' }}
                   onClick={ev => handleEdgeClick(ev, e.id)}
-                  onMouseMove={ev => handleEdgeMouseMove(ev, `⏱ ${(e.timeCost*100).toFixed(1)}s  💸 $${e.tollCost.toFixed(2)}`)}
+                  onMouseMove={ev => {
+                    // Same congestion-mult as api.js so displayed time matches A* cost
+                    const tNorm    = (traffic - 1) / 4;
+                    const heavyCut = 1 - tNorm * 0.35;
+                    const medCut   = 1 - tNorm * 0.55;
+                    const lvl      = e.trafficLevel ?? 0;
+                    const mult     = lvl >= heavyCut ? 4.0 : lvl >= medCut ? 2.0 : 1.0;
+                    const effTime  = (e.timeCost * mult * 100).toFixed(1);
+                    const tag      = mult === 4 ? ' 🔴 heavy' : mult === 2 ? ' 🟠 med' : '';
+                    handleEdgeMouseMove(ev, `⏱ ${effTime}s${tag}  💸 $${e.tollCost.toFixed(2)}`);
+                  }}
                   onMouseLeave={() => setTooltip(null)}
                 />
 
@@ -274,8 +439,8 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
                   /* Under-glow of path */
                   <line
                     x1={na.x} y1={na.y} x2={nb.x} y2={nb.y}
-                    stroke="#00cfff" strokeWidth={8}
-                    filter="url(#glow-cyan)" opacity={0.18}
+                    stroke="#00b4ff" strokeWidth={9}
+                    filter="url(#glow-blue)" opacity={0.28}
                   />
                 ) : (
                   // ── Normal road: per-edge congestion state from slider
@@ -299,10 +464,10 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
                 {isPath && !blocked && (
                   <line
                     x1={na.x} y1={na.y} x2={nb.x} y2={nb.y}
-                    stroke="#00cfff" strokeWidth={4}
+                    stroke="#00b4ff" strokeWidth={4.5}
                     strokeDasharray="18,10"
                     strokeDashoffset={animOffset}
-                    opacity={0.65}
+                    opacity={0.8}
                   />
                 )}
 
@@ -334,32 +499,13 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
           <path
             d={partialPathD}
             fill="none"
-            stroke="#00cfff"
-            strokeWidth={5}
+            stroke="#00b4ff"
+            strokeWidth={6}
             strokeLinecap="round"
             strokeLinejoin="round"
-            filter="url(#glow-cyan)"
-            opacity={0.95}
+            filter="url(#glow-blue)"
+            opacity={0.98}
           />
-        )}
-
-        {/* Tooltip in SVG space */}
-        {tooltip && (
-          <g style={{ pointerEvents: 'none' }}>
-            <rect
-              x={tooltip.svgX + 10} y={tooltip.svgY - 26}
-              width={tooltip.text.length * 7.4 + 14}
-              height={26}
-              rx={5} fill="#111"
-              stroke="#00cfff" strokeWidth={0.8}
-              opacity={0.95}
-            />
-            <text
-              x={tooltip.svgX + 17} y={tooltip.svgY - 8}
-              fill="#e0e0e0" fontSize={13}
-              fontFamily="Rajdhani, sans-serif" fontWeight={600}
-            >{tooltip.text}</text>
-          </g>
         )}
 
         {/* ── NODES ─────────────────────────────────────────── */}
@@ -370,7 +516,7 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
             const isOnPath = pathNodeSet.has(n.id) && !isStart && !isGoal;
 
             let fill   = "#1a1a1a";
-            let stroke = "#00cfff";
+            let stroke = "#00b4ff";
             let glow   = null;
             let label  = n.label;
             let r      = 10;
@@ -391,9 +537,9 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
               r       = 15;
               strokeW = 2.5;
             } else if (isOnPath) {
-              fill    = "#002233";
-              stroke  = "#00cfff";
-              glow    = "url(#glow-cyan)";
+              fill    = "#001830";
+              stroke  = "#00b4ff";
+              glow    = "url(#glow-blue)";
               strokeW = 2;
             }
 
@@ -408,7 +554,7 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
                 {(isOnPath || isStart || isGoal) && (
                   <circle cx={n.x} cy={n.y} r={r + 7}
                     fill="none"
-                    stroke={isStart ? "#00ff88" : isGoal ? "#ff4444" : "#00cfff"}
+                    stroke={isStart ? "#00ff88" : isGoal ? "#ff4444" : "#00b4ff"}
                     strokeWidth={1}
                     opacity={0.25}
                     className="pulse-ring"
@@ -424,21 +570,61 @@ function CityGraph({ graph, start, goal, pathNodeIds, traffic, godMode, calculat
                   filter={glow}
                 />
 
-                {/* Label */}
-                <text
-                  x={n.x} y={n.y + 4.5}
-                  textAnchor="middle"
-                  fontSize={isStart || isGoal ? 11 : 7.5}
-                  fill={isStart ? "#000" : isGoal ? "#fff" : "#aaaaaa"}
-                  fontWeight="700"
-                  fontFamily="Rajdhani, sans-serif"
-                  style={{ pointerEvents: 'none', userSelect: 'none' }}
-                >{label}</text>
               </g>
             );
           })}
         </g>
       </svg>
+
+      {/* ── DOM Node Labels (pixel-sharp at any zoom) ── */}
+      {graph && (() => {
+        const wrap = wrapRef.current;
+        if (!wrap) return null;
+        const { width: wW, height: wH } = wrap.getBoundingClientRect();
+        // Map SVG coord → screen coord inside the wrapper
+        const toScreen = (svgX, svgY) => ({
+          x: pan.x + (svgX / SVG_W) * wW * zoom,
+          y: pan.y + (svgY / SVG_H) * wH * zoom,
+        });
+        return nodes.map(n => {
+          const isStart  = n.id === start;
+          const isGoal   = n.id === goal;
+          const isOnPath = pathNodeSet.has(n.id) && !isStart && !isGoal;
+          const label    = isStart ? 'S' : isGoal ? 'G' : n.label;
+          const { x, y } = toScreen(n.x, n.y);
+          // Don't render if outside the visible wrapper
+          if (x < -40 || x > wW + 40 || y < -40 || y > wH + 40) return null;
+          const baseSize = isStart || isGoal ? 11 : 7.5;
+          return (
+            <div
+              key={`lbl-${n.id}`}
+              style={{
+                position:  'absolute',
+                left:      x,
+                top:       y,
+                transform: 'translate(-50%, -50%)',
+                fontSize:  `${baseSize * Math.min(zoom, 3)}px`,
+                fontFamily: 'Orbitron, sans-serif',
+                fontWeight: 700,
+                color:      isStart ? '#003' : isGoal ? '#fff' : '#b0b0b0',
+                pointerEvents: 'none',
+                userSelect: 'none',
+                lineHeight: 1,
+                whiteSpace: 'nowrap',
+                textShadow: isStart
+                  ? '0 0 4px rgba(0,255,136,0.3)'
+                  : isGoal
+                  ? '0 0 4px rgba(255,68,68,0.5)'
+                  : isOnPath
+                  ? '0 0 6px rgba(0,180,255,0.8)'
+                  : 'none',
+              }}
+            >
+              {label}
+            </div>
+          );
+        });
+      })()}
     </div>
   );
 }
